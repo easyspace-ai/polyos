@@ -1,0 +1,39 @@
+{
+  "name": "polyzeng",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Electron + Vite + React 最小可打包壳（原业务代码已移除）",
+  "workspaces": [
+    "apps/electron"
+  ],
+  "trustedDependencies": [
+    "electron"
+  ],
+  "scripts": {
+    "typecheck": "cd apps/electron && bun run typecheck",
+    "electron:clean": "bun run scripts/electron-clean.ts",
+    "electron:build:main": "bun run scripts/electron-build-main.ts",
+    "electron:build:preload": "bun run scripts/electron-build-preload.ts",
+    "electron:build:renderer": "bun run scripts/electron-build-renderer.ts",
+    "electron:build:resources": "bun run scripts/electron-build-resources.ts",
+    "electron:build": "bun run electron:build:main && bun run electron:build:preload && bun run electron:build:renderer && bun run electron:build:resources",
+    "electron:dev": "bun run scripts/electron-dev.ts",
+    "electron:start": "bun run electron:build && electron apps/electron",
+    "electron:dist": "bun run electron:build && cd apps/electron && electron-builder --config electron-builder.yml",
+    "electron:dist:mac": "bun run electron:build && cd apps/electron && electron-builder --config electron-builder.mac.yml --mac",
+    "electron:dist:win": "bun run electron:build && cd apps/electron && electron-builder --config electron-builder.yml --win",
+    "electron:dist:linux": "bun run electron:build && cd apps/electron && electron-builder --config electron-builder.yml --linux"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.0.8",
+    "@vitejs/plugin-react": "^5.1.2",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.0.0",
+    "vite": "^6.2.4"
+  }
+}

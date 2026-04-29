@@ -1,0 +1,59 @@
+appId: com.polyzeng.electron-shell
+# 可执行文件名不能含空格，否则 macOS 打包 rename 会失败
+productName: PolyzengShell
+copyright: Copyright © 2026
+
+electronVersion: "39.2.7"
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - "!**/*.map"
+  - package.json
+  - "!node_modules/**/*"
+
+extraMetadata:
+  main: dist/main.cjs
+
+asar: true
+
+mac:
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # 本机 Apple Silicon 仅需 arm64；若需 Intel 安装包再恢复 x64（会多一份 ~250MB 复制）
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+  artifactName: "${productName}-${arch}.${ext}"
+
+dmg:
+  title: "Polyzeng Shell"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: "${productName}-${arch}.${ext}"
+
+nsis:
+  oneClick: true
+  perMachine: false
+
+linux:
+  category: Development
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  artifactName: "${productName}-${arch}.${ext}"

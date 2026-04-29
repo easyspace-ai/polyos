@@ -1,0 +1,3 @@
+# macOS 专用：使用本机已解压的 darwin Electron，避免默认 unpack 流程下 MacOS/Electron 未就绪就 rename
+extends: ./electron-builder.yml
+electronDist: ../../node_modules/electron/dist

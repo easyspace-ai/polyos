@@ -1,0 +1,29 @@
+{
+  "name": "@polyzeng/electron",
+  "version": "0.1.0",
+  "description": "Minimal Electron + Vite + React shell",
+  "main": "dist/main.cjs",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build:main": "node ../../node_modules/esbuild/bin/esbuild src/main/index.ts --bundle --platform=node --format=cjs --outfile=dist/main.cjs --external:electron",
+    "build:preload": "node ../../node_modules/esbuild/bin/esbuild src/preload/preload.ts --bundle --platform=node --format=cjs --outfile=dist/preload.cjs --external:electron",
+    "build:renderer": "vite build",
+    "build:copy": "bun ../../scripts/electron-build-resources.ts",
+    "build": "bun run build:main && bun run build:preload && bun run build:renderer && bun run build:copy",
+    "dev": "vite dev",
+    "typecheck": "tsc --noEmit",
+    "start": "bun run build && electron ."
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0"
+  }
+}

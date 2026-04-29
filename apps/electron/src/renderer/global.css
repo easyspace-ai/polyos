@@ -1,0 +1,78 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: canvas;
+  color: canvastext;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.card {
+  max-width: 36rem;
+  padding: 1.5rem 1.75rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, canvastext 12%, transparent);
+  background: color-mix(in srgb, canvas 92%, canvastext 8%);
+}
+
+.card h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.card p {
+  margin: 0 0 1rem;
+  opacity: 0.85;
+  font-size: 0.95rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  font-size: 0.875rem;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 0.8em;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: color-mix(in srgb, canvastext 8%, transparent);
+}
+
+button {
+  cursor: pointer;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, canvastext 20%, transparent);
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  background: canvas;
+}
+
+button:hover {
+  border-color: color-mix(in srgb, canvastext 40%, transparent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

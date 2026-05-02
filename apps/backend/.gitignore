@@ -1,0 +1,20 @@
+# Rust build artifacts
+target/
+*.rs.bk
+*.pdb
+
+# Compiled server binaries
+bin/
+
+# Runtime data / state / logs
+data/accounts.json
+data/derived-credentials.json
+data/global-params.json
+data/positions-state.json
+data/positions-state.json.tmp
+data/trade-history.sqlite
+data/trade-history.sqlite*
+data/logs/
+data
+# Bundled frontend build output
+internal/delivery/httpserver/web/dist/

@@ -1,6 +1,6 @@
-appId: com.polyzeng.electron-shell
+appId: com.polylzz.electron-shell
 # 可执行文件名不能含空格，否则 macOS 打包 rename 会失败
-productName: PolyzengShell
+productName: PolyBot
 copyright: Copyright © 2026
 
 electronVersion: "39.2.7"
@@ -19,6 +19,11 @@ extraMetadata:
   main: dist/main.cjs
 
 asar: true
+extraResources:
+  - from: resources/backend
+    to: backend
+    filter:
+      - "**/*"
 
 mac:
   category: public.app-category.developer-tools
@@ -37,7 +42,7 @@ mac:
   artifactName: "${productName}-${arch}.${ext}"
 
 dmg:
-  title: "Polyzeng Shell"
+  title: "PolyBot"
 
 win:
   target:
@@ -49,6 +54,7 @@ win:
 nsis:
   oneClick: true
   perMachine: false
+  include: build/installer.nsh
 
 linux:
   category: Development

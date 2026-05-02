@@ -1,62 +1,34 @@
-# dependencies (bun install)
-node_modules
+# =============================================================================
+# Dependencies
+# =============================================================================
+node_modules/
 
-# output
-out
-dist
+# =============================================================================
+# Build / Output
+# =============================================================================
+out/
+dist/
 *.tgz
-.build
-apps/electron/release
-apps/electron/resources/session-mcp-server/
-apps/electron/resources/pi-agent-server/
+.build/
 
-# code coverage
-coverage
-*.lcov
+# =============================================================================
+# Logs
+# =============================================================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
-# logs
-logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
-
-# dotenv environment variable files
+# =============================================================================
+# Environment / Secrets
+# =============================================================================
 .env
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*.local
 .env.local
-
-# caches
-.eslintcache
-.cache
-*.tsbuildinfo
-.wrangler
-.mintlify
-
-# OSS sync temp directory
-.oss-sync-temp/
-
-# IntelliJ based IDEs
-.idea
-
-# Python bytecode
-__pycache__/
-*.pyc
-
-# Finder (MacOS) folder config
-.DS_Store
-
-# Claude Code local settings (user-specific)
-.claude/settings.local.json
-
-# Accidental literal tilde directories (Node.js doesn't expand ~)
-~/
-
-# Lock files from other package managers
-pnpm-lock.yaml
-
-# Craft Agent local data (sessions, credentials, config)
-.craft-agent/
 
 # SSH keys and secrets
 *.pem
@@ -72,3 +44,59 @@ credentials.enc
 # act (local GitHub Actions runner)
 .secrets
 .actrc
+
+# =============================================================================
+# Caches
+# =============================================================================
+.eslintcache
+.cache/
+*.tsbuildinfo
+.wrangler/
+.mintlify/
+
+# =============================================================================
+# IDE / Editor
+# =============================================================================
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+
+# Accidental literal tilde directories
+~/
+
+# =============================================================================
+# Language-specific
+# =============================================================================
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+
+# --- Rust ---
+# Ignore build artifacts everywhere; each crate manages its own Cargo.lock
+target/
+*.rs.bk
+*.pdb
+
+# =============================================================================
+# Misc
+# =============================================================================
+.craft-agent/
+.claude/settings.local.json
+.oss-sync-temp/
+
+# Lock files from other package managers
+pnpm-lock.yaml
+data
+node_modules/

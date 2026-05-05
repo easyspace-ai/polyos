@@ -1,7 +1,7 @@
-export type PriceTier = "A" | "B" | "C";
+export type PriceTier = string;
 
 export interface TierConfig {
-  id: PriceTier;
+  id: string;
   label: string;
   min: number;
   max: number;
@@ -11,12 +11,16 @@ export interface TierConfig {
 
 export interface GlobalParams {
   dailyBudgetPct: number; // 资产中拿出多少比例作为当日资金池
-  /** 官方 / 外部 API 成交、由链上同步进本地的仓位：移动止损默认比例（%） */
+  /** 未命中自定义价格区间时使用的移动止损默认比例（%） */
   externalDefaultStopLossPct: number;
+  /** 赛事列表后端抓取超时秒数 */
+  homeMarketsTimeoutSec: number;
+  /** 后端赛事列表磁盘缓存 TTL（秒），与 Polymarket 全局参数一并保存 */
+  homeMarketsCacheTtlSec: number;
   maxSpread: number; // 最大允许买卖价差
   minDepthMultiplier: number; // 深度需大于建议金额倍数
   tiers: TierConfig[];
-  leagues: ("NBA" | "NCAAB" | "NHL")[];
+  leagues: string[];
 }
 
 export interface Market {
@@ -28,7 +32,7 @@ export interface Market {
   /** Gamma event id；用于合并同一场胜负盘两行 */
   eventId?: string;
   question: string; // 赛事描述
-  league: "NBA" | "NCAAB" | "NHL";
+  league: string;
   startTime: string; // ISO
   yesTokenId?: string;
   noTokenId?: string;
@@ -48,7 +52,7 @@ export interface Market {
   tier: PriceTier | null;
   suggestedAmount: number; // 建议买入金额（USDC）
   customAmount?: number; // 用户覆盖
-  customStopLoss?: number; // 用户覆盖止损
+  customStopLoss?: number; // legacy: 曾用于单行覆盖止损，当前按全局计划计算
 }
 
 export type MarketsSortKey = "start" | "open" | "depth" | "volume";
@@ -67,7 +71,7 @@ export interface Position {
   /** CLOB token id for this outcome (Polymarket BUY target) */
   tokenId?: string;
   question: string;
-  league: "NBA" | "NCAAB" | "NHL";
+  league: string;
   tier: PriceTier;
   side: "YES" | "NO";
   entryPrice: number;

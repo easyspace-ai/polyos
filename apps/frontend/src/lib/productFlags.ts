@@ -1,12 +1,11 @@
 import type { GlobalParams } from "./types";
 
 /**
- * When true: 「默认止损 %」「价差上限」「深度倍数」在全局参数里禁用，
- * 前端用下方锁定值参与赛事列表过滤与下单；后端登记仓位时忽略客户端止损比例。
+ * When true: 「价差上限」「深度倍数」在全局参数里禁用，
+ * 前端用下方锁定值参与赛事列表过滤与下单。
  */
 export const LOCK_CROSS_MARKET_UI_PARAMS = true;
 
-export const LOCKED_DEFAULT_STOP_LOSS_PCT = 20;
 /** 放宽价差过滤（等价于不再按用户价差上限拦截） */
 export const LOCKED_MAX_SPREAD = 1;
 /** 0 → 深度校验恒通过 */

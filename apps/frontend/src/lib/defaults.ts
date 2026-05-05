@@ -3,13 +3,18 @@ import type { GlobalParams, TierConfig } from "./types";
 export const DEFAULT_PARAMS: GlobalParams = {
   dailyBudgetPct: 30,
   externalDefaultStopLossPct: 20,
+  homeMarketsTimeoutSec: 25,
+  homeMarketsCacheTtlSec: 180,
   maxSpread: 0.05,
   minDepthMultiplier: 3,
-  leagues: ["NBA", "NCAAB", "NHL"],
+  leagues: ["NBA", "NHL"],
   tiers: [
-    { id: "A", label: "高赔率区间", min: 0.05, max: 0.25, allocPct: 50, defaultStopLoss: 30 },
-    { id: "B", label: "中赔率区间", min: 0.25, max: 0.55, allocPct: 30, defaultStopLoss: 20 },
-    { id: "C", label: "低赔率区间", min: 0.55, max: 0.85, allocPct: 20, defaultStopLoss: 15 },
+    { id: "20-30", label: "20-30¢", min: 0.2, max: 0.3, allocPct: 17, defaultStopLoss: 20 },
+    { id: "30-40", label: "30-40¢", min: 0.3, max: 0.4, allocPct: 17, defaultStopLoss: 20 },
+    { id: "40-50", label: "40-50¢", min: 0.4, max: 0.5, allocPct: 17, defaultStopLoss: 20 },
+    { id: "50-60", label: "50-60¢", min: 0.5, max: 0.6, allocPct: 17, defaultStopLoss: 20 },
+    { id: "60-70", label: "60-70¢", min: 0.6, max: 0.7, allocPct: 16, defaultStopLoss: 20 },
+    { id: "70-80", label: "70-80¢", min: 0.7, max: 0.8, allocPct: 16, defaultStopLoss: 20 },
   ],
 };
 
@@ -31,19 +36,28 @@ export function normalizeGlobalParamsFromServer(data: unknown): GlobalParams {
     ? (tiersRaw as TierConfig[]).filter((t) => t && typeof t.id === "string")
     : DEFAULT_PARAMS.tiers;
   const leaguesRaw = r.leagues;
-  const leagues = (Array.isArray(leaguesRaw) ? leaguesRaw : DEFAULT_PARAMS.leagues) as (
-    | "NBA"
-    | "NCAAB"
-    | "NHL"
-  )[];
-  const okLeague = (x: unknown): x is "NBA" | "NCAAB" | "NHL" =>
-    x === "NBA" || x === "NCAAB" || x === "NHL";
-  const leaguesClean = leagues.filter(okLeague);
+  const leagues = Array.isArray(leaguesRaw) ? leaguesRaw : DEFAULT_PARAMS.leagues;
+  const leaguesClean = leagues.filter((x): x is string => typeof x === "string");
   return {
     dailyBudgetPct: num(r.dailyBudgetPct, DEFAULT_PARAMS.dailyBudgetPct),
     externalDefaultStopLossPct: num(
       r.externalDefaultStopLossPct ?? r.defaultStopLossPct,
       DEFAULT_PARAMS.externalDefaultStopLossPct,
+    ),
+    homeMarketsTimeoutSec: Math.round(
+      Math.min(
+        120,
+        Math.max(5, num(r.homeMarketsTimeoutSec, DEFAULT_PARAMS.homeMarketsTimeoutSec)),
+      ),
+    ),
+    homeMarketsCacheTtlSec: Math.round(
+      Math.min(
+        7200,
+        Math.max(
+          30,
+          num(r.homeMarketsCacheTtlSec ?? r["home_markets_cache_ttl_sec"], DEFAULT_PARAMS.homeMarketsCacheTtlSec),
+        ),
+      ),
     ),
     maxSpread: num(r.maxSpread, DEFAULT_PARAMS.maxSpread),
     minDepthMultiplier: num(r.minDepthMultiplier, DEFAULT_PARAMS.minDepthMultiplier),

@@ -26,7 +26,7 @@ export function backendRowToPosition(
   const stopPct = p.stopTrailPct > 1 ? p.stopTrailPct : p.stopTrailPct * 100;
   const mid = m && m.midPrice > 0 ? m.midPrice : p.avgEntryPrice;
   const status = mapBackendStateToStatus(p.state);
-  const tier = m?.tier ?? getTierForPrice(p.avgEntryPrice, params.tiers) ?? "C";
+  const tier = m?.tier ?? getTierForPrice(p.avgEntryPrice, params.tiers) ?? "DEFAULT";
   const pnl = (mid - p.avgEntryPrice) * p.shares;
   const pnlPct = p.avgEntryPrice > 0 ? ((mid - p.avgEntryPrice) / p.avgEntryPrice) * 100 : 0;
   return {

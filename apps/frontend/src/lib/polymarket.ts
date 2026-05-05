@@ -51,7 +51,7 @@ interface HomeMarketItem {
   eventId?: string;
   eventSlug?: string;
   question: string;
-  league: "NBA" | "NCAAB" | "NHL";
+  league: string;
   startTime: string;
   yesTokenId?: string;
   noTokenId?: string;
@@ -74,6 +74,8 @@ interface HomeMarketsResponse {
   };
   timestamp: string;
   cached: boolean;
+  stale?: boolean;
+  warning?: string;
 }
 
 /**
@@ -83,8 +85,9 @@ interface HomeMarketsResponse {
 export async function fetchBasketballMarkets(
   params: GlobalParams,
   prevOpenPrices: Record<string, number> = {},
+  opts?: { forceRefresh?: boolean },
 ): Promise<Market[]> {
-  const groups = await Promise.all(
+  const groups = await Promise.allSettled(
     params.leagues.map(async (league) => {
       const rows: Market[] = [];
       const qs = new URLSearchParams();
@@ -92,10 +95,13 @@ export async function fetchBasketballMarkets(
       qs.set("status", "active");
       // Aligns date= filtering with poly-nba-markets when you pass `date` later.
       qs.set("tz_offset", String(new Date().getTimezoneOffset()));
+      if (opts?.forceRefresh) {
+        qs.set("refresh", "1");
+      }
       const res = await fetchWithTimeout(
         `${BACKEND_BASE}/api/home/markets?${qs.toString()}`,
         {},
-        18_000,
+        Math.max(8_000, params.homeMarketsTimeoutSec * 1000 + 3_000),
       );
       if (!res.ok) {
         throw new Error(`backend markets fetch failed (${res.status})`);
@@ -103,6 +109,9 @@ export async function fetchBasketballMarkets(
       const body = (await res.json()) as HomeMarketsResponse;
       if (!body.success) {
         throw new Error("backend markets response not successful");
+      }
+      if (body.warning && body.data.markets.length === 0) {
+        throw new Error(body.warning);
       }
       for (const r of body.data.markets) {
         const mid = Number(r.midPrice) || 0;
@@ -140,7 +149,14 @@ export async function fetchBasketballMarkets(
   );
 
   // 保留全部 outcome，避免因 A/B/C 区间只命中一侧导致同场只剩一行
-  return groups.flat();
+  const rows = groups.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+  if (rows.length === 0) {
+    const firstError = groups.find((result) => result.status === "rejected");
+    if (firstError?.status === "rejected") {
+      throw firstError.reason instanceof Error ? firstError.reason : new Error("赛事拉取失败");
+    }
+  }
+  return rows;
 }
 
 // --- Paper trading (test tab) ---

@@ -5,6 +5,12 @@ export function getTierForPrice(price: number, tiers: TierConfig[]): PriceTier |
   return t ? t.id : null;
 }
 
+export function getStopLossPctForPrice(price: number, params: GlobalParams): number {
+  const tierID = getTierForPrice(price, params.tiers);
+  const tier = tierID ? params.tiers.find((x) => x.id === tierID) : undefined;
+  return tier?.defaultStopLoss ?? params.externalDefaultStopLossPct;
+}
+
 /**
  * 资金分配公式：
  *   tierBudget = totalAsset * dailyBudgetPct% * tier.allocPct%
@@ -17,12 +23,14 @@ export function computeSuggestedAmounts(
 ): Market[] {
   const dailyPool = totalAssetUSDC * (params.dailyBudgetPct / 100);
 
-  const validByTier: Record<PriceTier, Market[]> = { A: [], B: [], C: [] };
+  const validByTier: Record<string, Market[]> = {};
+  for (const t of params.tiers) validByTier[t.id] = [];
   for (const m of markets) {
     if (!m.tier) continue;
     // 仅对「>50¢」一侧参与资金池分配与自动建议金额（胜负盘热门侧）
     if (!(m.midPrice > 0.5)) continue;
     if (m.spread > params.maxSpread) continue;
+    if (!validByTier[m.tier]) continue;
     validByTier[m.tier].push(m);
   }
 

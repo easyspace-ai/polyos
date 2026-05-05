@@ -1,9 +1,10 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Plus, Trash2 } from "lucide-react";
+import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { useParamsStore } from "@/lib/store";
-import { DEFAULT_PARAMS } from "@/lib/defaults";
 import {
   LOCK_CROSS_MARKET_UI_PARAMS,
   LOCKED_MAX_SPREAD,
@@ -11,8 +12,11 @@ import {
 } from "@/lib/productFlags";
 import type { PriceTier } from "@/lib/types";
 
+const QUICK_LEAGUES = ["NBA", "NCAAB", "NHL", "EPL", "MLS", "UCL", "MLB"] as const;
+
 export function SettingsTab() {
   const { params, setParams, reset } = useParamsStore();
+  const [leagueInput, setLeagueInput] = useState("");
 
   const updateTier = (id: PriceTier, patch: Partial<(typeof params.tiers)[number]>) => {
     setParams({
@@ -20,11 +24,42 @@ export function SettingsTab() {
     });
   };
 
-  const toggleLeague = (lg: "NBA" | "NCAAB" | "NHL") => {
-    const has = params.leagues.includes(lg);
-    const next = has ? params.leagues.filter((x) => x !== lg) : [...params.leagues, lg];
-    if (next.length === 0) return;
-    setParams({ leagues: next });
+  const addLeague = (raw: string) => {
+    const lg = normalizeLeagueLabel(raw);
+    if (!lg || params.leagues.includes(lg)) return;
+    setParams({ leagues: [...params.leagues, lg] });
+    setLeagueInput("");
+  };
+
+  const removeLeague = (lg: string) => {
+    if (params.leagues.length <= 1) return;
+    setParams({ leagues: params.leagues.filter((x) => x !== lg) });
+  };
+
+  const addTier = () => {
+    const bounds = nextTierBounds(params.tiers);
+    const id = uniqueTierId(
+      params.tiers.map((t) => t.id),
+      tierId(bounds.min, bounds.max),
+    );
+    setParams({
+      tiers: [
+        ...params.tiers,
+        {
+          id,
+          label: tierLabel(bounds.min, bounds.max),
+          min: bounds.min / 100,
+          max: bounds.max / 100,
+          allocPct: 0,
+          defaultStopLoss: params.externalDefaultStopLossPct,
+        },
+      ],
+    });
+  };
+
+  const removeTier = (id: PriceTier) => {
+    if (params.tiers.length <= 1) return;
+    setParams({ tiers: params.tiers.filter((t) => t.id !== id) });
   };
 
   return (
@@ -38,14 +73,34 @@ export function SettingsTab() {
             onChange={(v) => setParams({ dailyBudgetPct: Math.min(100, Math.max(1, v)) })}
           />
           <Field
-            label="外链仓位默认止损 %"
+            label="默认止损 %"
             value={params.externalDefaultStopLossPct}
             onChange={(v) =>
               setParams({
                 externalDefaultStopLossPct: Math.min(99, Math.max(1, Math.round(v))),
               })
             }
-            title="在 Polymarket 官网或其它渠道成交、由链上同步进本系统的仓位，启用移动止损时的默认回撤比例（写入后端 global-params 与风控默认 trail）"
+            title="所有未命中价格区间的仓位，统一使用这个回撤比例。"
+          />
+          <Field
+            label="赛事拉取超时（秒）"
+            value={params.homeMarketsTimeoutSec}
+            onChange={(v) =>
+              setParams({
+                homeMarketsTimeoutSec: Math.min(120, Math.max(5, Math.round(v))),
+              })
+            }
+            title="后端抓取赛事列表时允许等待的最长时间。网络慢时可适当调大；过大时页面等待也会变长。"
+          />
+          <Field
+            label="赛事列表缓存 TTL（秒）"
+            value={params.homeMarketsCacheTtlSec}
+            onChange={(v) =>
+              setParams({
+                homeMarketsCacheTtlSec: Math.min(7200, Math.max(30, Math.round(v))),
+              })
+            }
+            title="后端 home/markets 结果在磁盘上的新鲜度窗口；超时或点「刷新」会重新拉 Gamma/ESPN。建议 60–600；过短会增加上游压力。"
           />
         </div>
         {LOCK_CROSS_MARKET_UI_PARAMS ? (
@@ -56,45 +111,93 @@ export function SettingsTab() {
             </span>
             <span>
               {" "}
-              上方「外链仓位默认止损」会保存到后端：链上同步的新仓位用该比例作移动止损；在本系统登记仓位时也会同步为后端风控默认
-              trail。
+              上方「默认止损」会保存到后端：未命中价格区间的仓位统一使用该比例；命中价格区间的仓位使用区间内的默认止损。
+            </span>
+            <span>
+              {" "}
+              「赛事拉取超时」同时作用于后端赛事抓取和前端等待时长；「缓存 TTL」保存在服务端全局参数，仅影响赛事列表缓存。
             </span>
           </p>
         ) : null}
       </section>
 
       <section className="rounded-xl border bg-card p-5">
-        <h3 className="text-sm font-semibold">联赛</h3>
-        <div className="mt-3 flex gap-2">
-          {(["NBA", "NHL"] as const).map((lg) => {
-            const active = params.leagues.includes(lg);
-            return (
+        <h3 className="text-sm font-semibold">赛事分类</h3>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {params.leagues.map((lg) => (
+            <div
+              key={lg}
+              className="inline-flex h-9 items-center gap-1 rounded-md border border-primary/25 bg-primary/10 pl-3 pr-1 text-sm font-medium text-primary"
+            >
+              <span>{lg}</span>
               <Button
-                key={lg}
-                variant={active ? "default" : "outline"}
-                size="sm"
-                onClick={() => toggleLeague(lg)}
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-primary hover:bg-primary/15"
+                onClick={() => removeLeague(lg)}
+                disabled={params.leagues.length <= 1}
+                title={`删除 ${lg}`}
               >
-                {lg}
+                <Trash2 />
               </Button>
-            );
-          })}
+            </div>
+          ))}
+        </div>
+        <div className="mt-4 grid gap-2 md:grid-cols-[minmax(220px,320px)_auto]">
+          <Input
+            value={leagueInput}
+            onChange={(e) => setLeagueInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addLeague(leagueInput);
+              }
+            }}
+            placeholder="输入标签，例如 EPL、Soccer、MLB"
+          />
+          <Button onClick={() => addLeague(leagueInput)}>
+            <Plus />
+            添加分类
+          </Button>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {QUICK_LEAGUES.map((lg) => (
+            <Button
+              key={lg}
+              variant={params.leagues.includes(lg) ? "secondary" : "outline"}
+              size="sm"
+              onClick={() => addLeague(lg)}
+              disabled={params.leagues.includes(lg)}
+            >
+              {lg}
+            </Button>
+          ))}
         </div>
       </section>
 
       <section className="rounded-xl border bg-card p-5">
-        <h3 className="text-sm font-semibold">价格区间</h3>
-        <p className="mt-1 text-xs text-muted-foreground">
-          按 YES 价格中位数将赛事分入 A/B/C 三个区间，资金按区间占比分配。
-        </p>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold">价格区间</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              按 YES 价格中位数分组，资金按区间占比分配。
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={addTier}>
+            <Plus />
+            添加区间
+          </Button>
+        </div>
         <div className="mt-4 space-y-4">
           {params.tiers.map((t) => (
-            <div key={t.id} className="grid grid-cols-2 gap-3 rounded-lg border p-3 md:grid-cols-5">
+            <div key={t.id} className="grid grid-cols-2 gap-3 rounded-lg border p-3 md:grid-cols-6">
               <div>
-                <Label className="text-xs text-muted-foreground">区间</Label>
-                <div className="mt-1 font-semibold">
-                  {t.id} · {t.label}
-                </div>
+                <Label className="text-xs text-muted-foreground">名称</Label>
+                <Input
+                  value={t.label}
+                  onChange={(e) => updateTier(t.id, { label: e.target.value })}
+                  className="mt-1"
+                />
               </div>
               <Field
                 label="下限（¢）"
@@ -122,6 +225,17 @@ export function SettingsTab() {
                 value={t.defaultStopLoss}
                 onChange={(v) => updateTier(t.id, { defaultStopLoss: v })}
               />
+              <div className="flex items-end">
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => removeTier(t.id)}
+                  disabled={params.tiers.length <= 1}
+                  title={`删除 ${t.label}`}
+                >
+                  <Trash2 />
+                </Button>
+              </div>
             </div>
           ))}
         </div>
@@ -131,12 +245,34 @@ export function SettingsTab() {
         <Button variant="outline" onClick={reset}>
           重置为默认
         </Button>
-        <Button onClick={() => setParams(DEFAULT_PARAMS)} variant="ghost" className="hidden">
-          noop
-        </Button>
       </div>
     </div>
   );
+}
+
+function normalizeLeagueLabel(value: string) {
+  return value.trim().replace(/\s+/g, "-").toUpperCase();
+}
+
+function tierId(min: number, max: number) {
+  return `${min}-${max}`;
+}
+
+function tierLabel(min: number, max: number) {
+  return `${min}-${max}¢`;
+}
+
+function uniqueTierId(existing: string[], base: string) {
+  if (!existing.includes(base)) return base;
+  let i = 2;
+  while (existing.includes(`${base}-${i}`)) i += 1;
+  return `${base}-${i}`;
+}
+
+function nextTierBounds(tiers: Array<{ max: number }>) {
+  const lastMax = tiers.reduce((m, t) => Math.max(m, Math.round(t.max * 100)), 20);
+  const min = Math.min(90, Math.max(0, lastMax));
+  return { min, max: Math.min(100, min + 10) };
 }
 
 function Field({

@@ -40,13 +40,11 @@ import {
   formatProbPriceCents,
   formatSpreadWidthCents,
   formatUSD,
+  getStopLossPctForPrice,
+  getTierForPrice,
   passesDepthCheck,
 } from "@/lib/calc";
-import {
-  effectiveMarketParams,
-  LOCK_CROSS_MARKET_UI_PARAMS,
-  LOCKED_DEFAULT_STOP_LOSS_PCT,
-} from "@/lib/productFlags";
+import { effectiveMarketParams, LOCK_CROSS_MARKET_UI_PARAMS } from "@/lib/productFlags";
 import type { Market, TierConfig } from "@/lib/types";
 import {
   baseMatchTitle,
@@ -88,9 +86,9 @@ function suggestedInputClass(m: Market, amount: number, size: "sm" | "md" = "sm"
   );
 }
 
-/** 热门侧所在价格区间（全局参数里的 A/B/C），展示在「赛事」列 */
+/** 热门侧所在价格区间，展示在「赛事」列 */
 function favoriteTierCaption(favorite: Market, tiers: TierConfig[]): string {
-  if (!favorite.tier) return "价格区间：未命中 A / B / C（热门侧不在配置区间内）";
+  if (!favorite.tier) return "价格区间：未命中自定义区间，止损使用默认止损";
   const cfg = tiers.find((x) => x.id === favorite.tier);
   if (!cfg) return "价格区间：—";
   return `区间 ${favorite.tier} · ${cfg.label} ${formatProbPriceCents(cfg.min)} – ${formatProbPriceCents(cfg.max)} · 占资金 ${cfg.allocPct}%`;
@@ -114,10 +112,18 @@ function PolymarketLink({ url }: { url?: string }) {
 }
 
 /** 赛事列表 REST 轮询间隔；与监控模块快照轮询无关。 */
-const HOME_MARKETS_POLL_MS = 60_000;
+const HOME_MARKETS_POLL_MS = 30_000;
+
+/** 与后端 listingHorizonDays 一致，用于说明文案 */
+const HOME_MARKETS_LISTING_DAYS = 7;
+
+function marketLeagueKey(leagues: string[]): string {
+  return leagues.slice().sort().join("|");
+}
 
 export function MarketsTab() {
   const params = useParamsStore((s) => s.params);
+  const globalParamsHydrated = useParamsStore((s) => s.globalParamsHydrated);
   const effParams = useMemo(() => effectiveMarketParams(params), [params]);
   const wallet = useWalletStore();
   const {
@@ -141,17 +147,27 @@ export function MarketsTab() {
   const [closeBusy, setCloseBusy] = useState(false);
   const [listFilter, setListFilter] = useState<"all" | "tradeable">("all");
   const refreshPromiseRef = useRef<Promise<void> | null>(null);
+  const leagueKey = useMemo(() => marketLeagueKey(params.leagues), [params.leagues]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (opts?: { forceCache?: boolean }) => {
+    if (!useParamsStore.getState().globalParamsHydrated) {
+      return;
+    }
     if (refreshPromiseRef.current) {
       return refreshPromiseRef.current;
     }
+    const requestLeagueKey = marketLeagueKey(params.leagues);
     const run = (async () => {
       setRefreshing(true);
       setLoading(true);
       setError(null);
       try {
-        const fresh = await fetchBasketballMarkets(params, openPrices);
+        const fresh = await fetchBasketballMarkets(params, openPrices, {
+          forceRefresh: opts?.forceCache === true,
+        });
+        if (marketLeagueKey(useParamsStore.getState().params.leagues) !== requestLeagueKey) {
+          return;
+        }
         const withAmounts = computeSuggestedAmounts(fresh, effParams, wallet.usdcBalance);
         setMarkets(withAmounts);
       } catch (e) {
@@ -171,10 +187,21 @@ export function MarketsTab() {
   }, [effParams, openPrices, params, setError, setLoading, setMarkets, wallet.usdcBalance]);
 
   useEffect(() => {
-    if (markets.length === 0) void refresh();
-    const id = setInterval(refresh, HOME_MARKETS_POLL_MS);
+    if (!globalParamsHydrated) return;
+    if (markets.length === 0) void refresh({ forceCache: true });
+    const id = setInterval(() => void refresh(), HOME_MARKETS_POLL_MS);
     return () => clearInterval(id);
-  }, [markets.length, refresh]);
+  }, [markets.length, refresh, globalParamsHydrated]);
+
+  useEffect(() => {
+    if (!globalParamsHydrated) return;
+    refreshPromiseRef.current = null;
+    setMarkets(useMarketStore.getState().markets.filter((m) => params.leagues.includes(m.league)));
+    void refresh({ forceCache: true });
+    // This effect is intentionally scoped to league changes. Adding refresh would
+    // also bind it to price/open-price updates and can cause duplicate refreshes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leagueKey, globalParamsHydrated]);
 
   // 重新计算建议金额（依赖参数 / 余额变化）
   const enriched = useMemo(
@@ -250,16 +277,6 @@ export function MarketsTab() {
     if (!(entry > 0)) {
       throw new Error("盘口价格无效");
     }
-    const tier = m.tier ?? "C";
-    const tierCfg = params.tiers.find((t) => t.id === tier);
-    if (!tierCfg) {
-      throw new Error("区间配置缺失");
-    }
-    const stopLoss = LOCK_CROSS_MARKET_UI_PARAMS
-      ? (tierCfg.defaultStopLoss ?? LOCKED_DEFAULT_STOP_LOSS_PCT)
-      : (m.customStopLoss ?? tierCfg.defaultStopLoss ?? params.externalDefaultStopLossPct);
-    const trailFrac = stopLoss > 1 ? stopLoss / 100 : stopLoss;
-
     const orderResp = await placeMarketBuy({
       tokenId,
       amountUsdc: amount,
@@ -276,6 +293,9 @@ export function MarketsTab() {
         /* 使用首次返回的成交字段 */
       }
     }
+    const tier = m.tier ?? getTierForPrice(fill.avgPrice, params.tiers) ?? "DEFAULT";
+    const stopLoss = getStopLossPctForPrice(fill.avgPrice, params);
+    const trailFrac = stopLoss > 1 ? stopLoss / 100 : stopLoss;
 
     const reg = await registerBackendPosition({
       marketId: m.id,
@@ -420,7 +440,7 @@ export function MarketsTab() {
             <span className={boardLive ? "text-emerald-600 dark:text-emerald-400" : ""}>
               WebSocket {boardLive ? "已连接" : "未连接"}
             </span>
-            {` （约 2s 推送 CLOB 买一/卖一/中间价）· 列表深度/成交量 自动刷新 15s · 联赛 ${params.leagues.join(" / ")} · 列表按开赛时间（早 → 晚）`}
+            {` （约 2s 推送 CLOB 买一/卖一/中间价）· 列表缓存 ${params.homeMarketsCacheTtlSec}s（全局参数可改）；过期或点「刷新」会重新拉取 · 展示约未来 ${HOME_MARKETS_LISTING_DAYS} 天内开赛 · 价格实时更新 · 抓取超时 ${params.homeMarketsTimeoutSec}s · 联赛 ${params.leagues.join(" / ")} · 列表按开赛时间（早 → 晚）`}
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -467,7 +487,12 @@ export function MarketsTab() {
               </ToggleGroup>
             </>
           ) : null}
-          <Button variant="outline" size="sm" onClick={refresh} disabled={refreshing}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void refresh({ forceCache: true })}
+            disabled={refreshing || !globalParamsHydrated}
+          >
             {refreshing ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
@@ -484,7 +509,11 @@ export function MarketsTab() {
         </div>
       )}
 
-      {loading && enriched.length === 0 ? (
+      {!globalParamsHydrated ? (
+        <div className="flex h-40 items-center justify-center text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" /> 正在同步全局参数（联赛列表以后台为准）…
+        </div>
+      ) : loading && enriched.length === 0 ? (
         <div className="flex h-40 items-center justify-center text-muted-foreground">
           <Loader2 className="mr-2 size-4 animate-spin" /> 拉取 Polymarket 行情中…
         </div>
@@ -560,11 +589,7 @@ export function MarketsTab() {
                           const tierMeta = m.tier
                             ? params.tiers.find((t) => t.id === m.tier)
                             : undefined;
-                          const stopLoss = LOCK_CROSS_MARKET_UI_PARAMS
-                            ? (tierMeta?.defaultStopLoss ?? LOCKED_DEFAULT_STOP_LOSS_PCT)
-                            : (m.customStopLoss ??
-                              tierMeta?.defaultStopLoss ??
-                              params.externalDefaultStopLossPct);
+                          const stopLoss = getStopLossPctForPrice(m.midPrice, params);
                           return (
                             <TableRow
                               key={m.id}
@@ -651,13 +676,8 @@ export function MarketsTab() {
                                 <Input
                                   type="number"
                                   value={stopLoss}
-                                  readOnly={LOCK_CROSS_MARKET_UI_PARAMS}
-                                  disabled={LOCK_CROSS_MARKET_UI_PARAMS}
-                                  onChange={(e) =>
-                                    patchMarket(m.id, {
-                                      customStopLoss: Number(e.target.value),
-                                    })
-                                  }
+                                  readOnly
+                                  title={tierMeta ? "来自价格区间设置" : "未命中区间，使用默认止损"}
                                   className="h-7 w-16 text-right tabular-nums"
                                 />
                               </TableCell>
@@ -731,11 +751,7 @@ export function MarketsTab() {
                       const tierMeta = m.tier
                         ? params.tiers.find((t) => t.id === m.tier)
                         : undefined;
-                      const stopLoss = LOCK_CROSS_MARKET_UI_PARAMS
-                        ? (tierMeta?.defaultStopLoss ?? LOCKED_DEFAULT_STOP_LOSS_PCT)
-                        : (m.customStopLoss ??
-                          tierMeta?.defaultStopLoss ??
-                          params.externalDefaultStopLossPct);
+                      const stopLoss = getStopLossPctForPrice(m.midPrice, params);
                       return (
                         <div
                           key={m.id}
@@ -809,13 +825,8 @@ export function MarketsTab() {
                                 <Input
                                   type="number"
                                   value={stopLoss}
-                                  readOnly={LOCK_CROSS_MARKET_UI_PARAMS}
-                                  disabled={LOCK_CROSS_MARKET_UI_PARAMS}
-                                  onChange={(e) =>
-                                    patchMarket(m.id, {
-                                      customStopLoss: Number(e.target.value),
-                                    })
-                                  }
+                                  readOnly
+                                  title={tierMeta ? "来自价格区间设置" : "未命中区间，使用默认止损"}
                                   className="h-8 w-20 text-right tabular-nums"
                                 />
                               </div>

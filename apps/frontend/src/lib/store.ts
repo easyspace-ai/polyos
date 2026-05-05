@@ -5,6 +5,8 @@ import { saveGlobalParams } from "./tradingApi";
 
 interface ParamsStore {
   params: GlobalParams;
+  /** True after GET /api/settings/global-params (or error-path fallback) — avoids home/markets using defaults before persisted leagues apply. */
+  globalParamsHydrated: boolean;
   setParams: (p: Partial<GlobalParams>) => void;
   reset: () => void;
 }
@@ -26,6 +28,7 @@ function schedulePersistGlobalParams() {
 
 export const useParamsStore = create<ParamsStore>((set) => ({
   params: DEFAULT_PARAMS,
+  globalParamsHydrated: false,
   setParams: (p) =>
     set((s) => {
       const next = { ...s.params, ...p };
@@ -33,7 +36,7 @@ export const useParamsStore = create<ParamsStore>((set) => ({
       return { params: next };
     }),
   reset: () => {
-    set({ params: DEFAULT_PARAMS });
+    set({ params: DEFAULT_PARAMS, globalParamsHydrated: true });
     void saveGlobalParams(DEFAULT_PARAMS).catch(() => {});
   },
 }));

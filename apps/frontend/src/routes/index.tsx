@@ -42,7 +42,7 @@ function Dashboard() {
       try {
         const p = await fetchGlobalParams();
         if (!cancelled) {
-          useParamsStore.setState({ params: p });
+          useParamsStore.setState({ params: p, globalParamsHydrated: true });
         }
       } catch {
         if (cancelled) {
@@ -56,7 +56,7 @@ function Dashboard() {
             const legacyRaw = parsed?.state?.params;
             if (legacyRaw) {
               const legacy = normalizeGlobalParamsFromServer(legacyRaw);
-              useParamsStore.setState({ params: legacy });
+              useParamsStore.setState({ params: legacy, globalParamsHydrated: true });
               await saveGlobalParams(legacy);
               restored = true;
             }
@@ -71,7 +71,7 @@ function Dashboard() {
           }
         }
         if (!cancelled && !restored) {
-          useParamsStore.setState({ params: DEFAULT_PARAMS });
+          useParamsStore.setState({ params: DEFAULT_PARAMS, globalParamsHydrated: true });
         }
       }
     })();
@@ -80,7 +80,7 @@ function Dashboard() {
     };
   }, []);
 
-  /** Sync UI 全局参数 → 后端风控默认 trail（小数）；与链上同步外链仓位止损一致。 */
+  /** Sync UI 默认止损 → 后端风控默认 trail（小数）。 */
   useEffect(() => {
     const pct = (n: number) => (n > 1 ? n / 100 : n);
     void patchRiskConfig({

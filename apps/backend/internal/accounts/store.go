@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +25,61 @@ import (
 const schemaDerivedCredentialsV1 = "derived-credentials-v1"
 const polygonChainID = 137
 const gnosisSafeSignatureType = 3
+
+// CLOBAuthHTTPTimeout is the httpx client timeout for Polymarket CLOB L1 auth
+// (create/derive API key) during account import. Override with env CLOB_AUTH_TIMEOUT_SEC.
+func CLOBAuthHTTPTimeout() time.Duration {
+	const defaultSec = 90
+	const minSec = 15
+	const maxSec = 300
+	sec := defaultSec
+	if raw := strings.TrimSpace(os.Getenv("CLOB_AUTH_TIMEOUT_SEC")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			sec = n
+		}
+	}
+	if sec < minSec {
+		sec = minSec
+	}
+	if sec > maxSec {
+		sec = maxSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// CreateAccountRequestTimeout is the HTTP handler budget for create-account:
+// CLOB auth plus persist, balance, and portfolio calls.
+func CreateAccountRequestTimeout() time.Duration {
+	// Headroom beyond CLOB client timeout for disk IO and follow-up RPCs.
+	return CLOBAuthHTTPTimeout() + 90*time.Second
+}
+
+// newClobAuthHTTPClient builds the net/http client used for CLOB L1 auth.
+// If outboundProxyURL is non-empty (e.g. global-params proxyUrl), it is used
+// as the HTTP CONNECT proxy; otherwise ProxyFromEnvironment applies (HTTPS_PROXY,
+// https_proxy, NO_PROXY, etc.), matching curl and the rest of the Go stdlib.
+func newClobAuthHTTPClient(outboundProxyURL string) (*http.Client, error) {
+	var tr *http.Transport
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr = dt.Clone()
+	} else {
+		tr = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	if p := strings.TrimSpace(outboundProxyURL); p != "" {
+		u, err := url.Parse(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid outbound proxy URL: %w", err)
+		}
+		if !u.IsAbs() || strings.TrimSpace(u.Host) == "" {
+			return nil, fmt.Errorf("invalid outbound proxy URL: need absolute URL with host")
+		}
+		tr.Proxy = http.ProxyURL(u)
+	}
+	return &http.Client{
+		Transport: tr,
+		Timeout:   CLOBAuthHTTPTimeout(),
+	}, nil
+}
 
 // Store keeps account records compatible with the Rust backend.
 type Store struct {
@@ -206,7 +264,9 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 
 // DeriveAccountRecordWithCLOB follows the Rust backend flow:
 // EVM private key -> EOA -> deterministic Polymarket Safe -> CLOB L2 credentials.
-func DeriveAccountRecordWithCLOB(ctx context.Context, label *string, evmPrivateKey string) (models.AccountRecord, error) {
+// outboundProxyURL is the same optional HTTP proxy URL as global-params proxyUrl;
+// when empty, HTTPS_PROXY / HTTP_PROXY from the process environment are used.
+func DeriveAccountRecordWithCLOB(ctx context.Context, label *string, evmPrivateKey string, outboundProxyURL string) (models.AccountRecord, error) {
 	pk, err := normalizePrivateKeyHex(evmPrivateKey)
 	if err != nil {
 		return models.AccountRecord{}, err
@@ -233,10 +293,14 @@ func DeriveAccountRecordWithCLOB(ctx context.Context, label *string, evmPrivateK
 	if clobURL == "" {
 		clobURL = "https://clob.polymarket.com"
 	}
-	transport, err := httpx.New(httpx.ClientConfig{
+	rawHTTP, err := newClobAuthHTTPClient(outboundProxyURL)
+	if err != nil {
+		return models.AccountRecord{}, err
+	}
+	transport, err := httpx.NewWithHTTPClient(httpx.ClientConfig{
 		BaseURL: clobURL,
-		Timeout: 30 * time.Second,
-	})
+		Timeout: CLOBAuthHTTPTimeout(),
+	}, rawHTTP)
 	if err != nil {
 		return models.AccountRecord{}, fmt.Errorf("clob client: %w", err)
 	}
@@ -274,12 +338,13 @@ func DeriveAccountRecordWithCLOB(ctx context.Context, label *string, evmPrivateK
 		DerivedAt:          time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	logrus.WithFields(logrus.Fields{
-		"component":      "accounts",
-		"account_id":     rec.ID,
-		"eoa_address":    rec.EOAAddress,
-		"proxy_address":  rec.ProxyWalletAddress,
-		"has_clob_creds": rec.HasCLOBCredentials(),
-		"clob_url":       clobURL,
+		"component":              "accounts",
+		"account_id":             rec.ID,
+		"eoa_address":            rec.EOAAddress,
+		"proxy_address":          rec.ProxyWalletAddress,
+		"has_clob_creds":         rec.HasCLOBCredentials(),
+		"clob_url":               clobURL,
+		"outbound_proxy_explicit": strings.TrimSpace(outboundProxyURL) != "",
 	}).Info("account derived")
 	return rec, nil
 }

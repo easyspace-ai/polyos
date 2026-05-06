@@ -100,3 +100,5 @@ target/
 pnpm-lock.yaml
 data
 node_modules/
+
+polyclient/.env

@@ -2,10 +2,14 @@ package realtime
 
 import (
 	"context"
+	"math/rand"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	polyauth "github.com/drinkthere/polymarket-sdk/polymarket/auth"
 	userws "github.com/drinkthere/polymarket-sdk/polymarket/ws/user"
 	"github.com/drinkthere/polyserver/internal/models"
@@ -18,15 +22,35 @@ type AccountProvider func() (models.AccountRecord, bool)
 // UserEventHandler is called when user order/trade websocket events arrive.
 type UserEventHandler func(context.Context)
 
+// WSTimeoutProvider returns connect/subscribe timeouts for the user websocket.
+type WSTimeoutProvider func() (connect time.Duration, subscribe time.Duration)
+
 // UserFeed owns the authenticated CLOB user websocket.
 type UserFeed struct {
 	accountProvider AccountProvider
+	timeoutProvider WSTimeoutProvider
 	handler         UserEventHandler
+	proxyURL        *url.URL
 }
 
 // NewUserFeed creates a CLOB user websocket feed.
-func NewUserFeed(provider AccountProvider, handler UserEventHandler) *UserFeed {
-	return &UserFeed{accountProvider: provider, handler: handler}
+func NewUserFeed(provider AccountProvider, timeoutProvider WSTimeoutProvider, handler UserEventHandler) *UserFeed {
+	return &UserFeed{accountProvider: provider, timeoutProvider: timeoutProvider, handler: handler}
+}
+
+// SetProxy configures the HTTP/WS proxy for Polymarket outbound traffic.
+func (u *UserFeed) SetProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		u.proxyURL = nil
+		return nil
+	}
+	p, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	u.proxyURL = p
+	return nil
 }
 
 // Run keeps the user websocket connected for the current default account.
@@ -54,19 +78,25 @@ func (u *UserFeed) Run(ctx context.Context) {
 				"account_id": acc.ID,
 			}).Warn("user websocket session ended")
 		}
-		if !sleepOrDone(ctx, 2*time.Second) {
+		if !sleepOrDone(ctx, 5*time.Second+jitter(2*time.Second)) {
 			return
 		}
 	}
 }
 
 func (u *UserFeed) session(ctx context.Context, acc models.AccountRecord) error {
+	connTimeout, subTimeout := u.wsTimeouts()
+	dialer := &websocket.Dialer{HandshakeTimeout: connTimeout}
+	if u.proxyURL != nil {
+		dialer.Proxy = http.ProxyURL(u.proxyURL)
+	}
 	client, err := userws.NewClient(userws.Config{
 		URL:              userWSEndpoint(),
+		Dialer:           dialer,
 		WriteTimeout:     5 * time.Second,
 		PingInterval:     15 * time.Second,
 		Reconnect:        true,
-		ReconnectBackoff: 500 * time.Millisecond,
+		ReconnectBackoff: 2 * time.Second,
 	})
 	if err != nil {
 		return err
@@ -76,13 +106,13 @@ func (u *UserFeed) session(ctx context.Context, acc models.AccountRecord) error 
 			logrus.WithError(err).WithField("component", "user_ws").Debug("close user websocket failed")
 		}
 	}()
-	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	connectCtx, cancel := context.WithTimeout(ctx, connTimeout)
 	defer cancel()
 	if err := client.Connect(connectCtx); err != nil {
 		return err
 	}
 	creds := polyauth.APICredentials{Key: acc.APIKey, Secret: acc.APISecret, Passphrase: acc.APIPassphrase}
-	subCtx, subCancel := context.WithTimeout(ctx, 5*time.Second)
+	subCtx, subCancel := context.WithTimeout(ctx, subTimeout)
 	defer subCancel()
 	if err := client.Subscribe(subCtx, userws.SubscribeRequest{
 		Credentials: creds,
@@ -108,7 +138,7 @@ func (u *UserFeed) session(ctx context.Context, acc models.AccountRecord) error 
 		}
 		u.logEvents(acc.ID, msg.Events)
 		if u.handler != nil {
-			runCtx, runCancel := context.WithTimeout(ctx, 30*time.Second)
+			runCtx, runCancel := context.WithTimeout(ctx, 45*time.Second)
 			u.handler(runCtx)
 			runCancel()
 		}
@@ -156,6 +186,33 @@ func userWSEndpoint() string {
 	return "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 }
 
+func (u *UserFeed) wsTimeouts() (connect time.Duration, subscribe time.Duration) {
+	connect = 15 * time.Second
+	subscribe = 10 * time.Second
+	if u.timeoutProvider != nil {
+		c, s := u.timeoutProvider()
+		if c > 0 {
+			connect = c
+		}
+		if s > 0 {
+			subscribe = s
+		}
+	}
+	if connect < 5*time.Second {
+		connect = 5 * time.Second
+	}
+	if connect > 60*time.Second {
+		connect = 60 * time.Second
+	}
+	if subscribe < 3*time.Second {
+		subscribe = 3 * time.Second
+	}
+	if subscribe > 30*time.Second {
+		subscribe = 30 * time.Second
+	}
+	return connect, subscribe
+}
+
 func truncateID(v string) string {
 	if len(v) <= 16 {
 		return v
@@ -172,4 +229,12 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// jitter returns a random duration up to max, used to spread reconnect storms.
+func jitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(max)))
 }

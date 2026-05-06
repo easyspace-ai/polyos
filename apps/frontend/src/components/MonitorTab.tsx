@@ -52,6 +52,7 @@ import {
   type ClobTokenMarketMeta,
   type PlaceOrderResult,
 } from "@/lib/tradingApi";
+import { toast } from "sonner";
 import { ClobTradeHistory } from "@/components/ClobTradeHistory";
 import { LiveEventMark } from "@/components/LiveEventMark";
 
@@ -916,8 +917,18 @@ export function MonitorTab() {
       await marketSell({ tokenId: row.tokenId, shares: row.shares });
       await closeBackendPosition(row.id);
       await refreshAll();
+      toast.success("卖出已提交", { description: "CLOB 市价卖单已发出，数据稍后刷新。" });
     } catch (e) {
-      setSnapError((e as Error).message);
+      const raw = (e as Error).message;
+      const minHint =
+        raw.toLowerCase().includes("min_order") ||
+        raw.toLowerCase().includes("invalid_order_min") ||
+        raw.toLowerCase().includes("min size");
+      const msg = minHint
+        ? `${raw} 说明：CLOB 单笔有最小份额（见盘口 min_order_size）；碎仓请到 polymarket.com 处理或合并后再试。`
+        : raw;
+      setSnapError(msg);
+      toast.error("卖出失败", { description: msg, duration: 10_000 });
     } finally {
       setSellingId(null);
     }

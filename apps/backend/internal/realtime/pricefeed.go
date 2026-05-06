@@ -2,6 +2,8 @@ package realtime
 
 import (
 	"context"
+	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -9,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	marketws "github.com/drinkthere/polymarket-sdk/polymarket/ws/market"
 	"github.com/drinkthere/polyserver/internal/positions"
 	"github.com/drinkthere/polyserver/internal/risk"
@@ -30,6 +33,9 @@ type PriceFeed struct {
 	publisher   TickPublisher
 	tickHandler TickHandler
 	changed     chan struct{}
+	connTimeout time.Duration
+	subTimeout  time.Duration
+	proxyURL    *url.URL
 }
 
 // NewPriceFeed creates a PriceFeed.
@@ -40,6 +46,29 @@ func NewPriceFeed(positionStore *positions.Store, priceBook *risk.PriceBook) *Pr
 		priceBook:   priceBook,
 		changed:     make(chan struct{}, 1),
 	}
+}
+
+// SetTimeouts configures market websocket connect/subscribe timeouts.
+func (p *PriceFeed) SetTimeouts(connect, subscribe time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.connTimeout = connect
+	p.subTimeout = subscribe
+}
+
+// SetProxy configures the HTTP/WS proxy for Polymarket outbound traffic.
+func (p *PriceFeed) SetProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		p.proxyURL = nil
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	p.proxyURL = u
+	return nil
 }
 
 // SetPublisher registers a frontend tick publisher.
@@ -146,7 +175,7 @@ func (p *PriceFeed) Run(ctx context.Context) error {
 }
 
 func (p *PriceFeed) runMarketWS(ctx context.Context, tokens []string) {
-	backoff := 500 * time.Millisecond
+	backoff := 2 * time.Second
 	for ctx.Err() == nil {
 		if err := p.marketWSSession(ctx, tokens); err != nil && ctx.Err() == nil {
 			logrus.WithError(err).WithFields(logrus.Fields{
@@ -158,8 +187,8 @@ func (p *PriceFeed) runMarketWS(ctx context.Context, tokens []string) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
-			if backoff < 15*time.Second {
+		case <-time.After(backoff + jitter(backoff/2)):
+			if backoff < 30*time.Second {
 				backoff *= 2
 			}
 		}
@@ -167,12 +196,30 @@ func (p *PriceFeed) runMarketWS(ctx context.Context, tokens []string) {
 }
 
 func (p *PriceFeed) marketWSSession(ctx context.Context, tokens []string) error {
+	p.mu.RLock()
+	connTimeout := p.connTimeout
+	subTimeout := p.subTimeout
+	p.mu.RUnlock()
+	if connTimeout <= 0 {
+		connTimeout = 15 * time.Second
+	}
+	if subTimeout <= 0 {
+		subTimeout = 10 * time.Second
+	}
+	p.mu.RLock()
+	proxy := p.proxyURL
+	p.mu.RUnlock()
+	dialer := &websocket.Dialer{HandshakeTimeout: connTimeout}
+	if proxy != nil {
+		dialer.Proxy = http.ProxyURL(proxy)
+	}
 	client, err := marketws.NewChannelClient(marketws.Config{
 		URL:              marketWSEndpoint(),
+		Dialer:           dialer,
 		WriteTimeout:     5 * time.Second,
 		PingInterval:     15 * time.Second,
 		Reconnect:        true,
-		ReconnectBackoff: 500 * time.Millisecond,
+		ReconnectBackoff: 2 * time.Second,
 	})
 	if err != nil {
 		return err
@@ -187,7 +234,7 @@ func (p *PriceFeed) marketWSSession(ctx context.Context, tokens []string) error 
 		"endpoint":    marketWSEndpoint(),
 		"token_count": len(tokens),
 	}).Info("connecting market websocket")
-	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	connectCtx, cancel := context.WithTimeout(ctx, connTimeout)
 	defer cancel()
 	if err := client.Connect(connectCtx); err != nil {
 		return err
@@ -196,7 +243,7 @@ func (p *PriceFeed) marketWSSession(ctx context.Context, tokens []string) error 
 		"component":   "price_feed",
 		"token_count": len(tokens),
 	}).Info("market websocket connected")
-	subCtx, subCancel := context.WithTimeout(ctx, 5*time.Second)
+	subCtx, subCancel := context.WithTimeout(ctx, subTimeout)
 	defer subCancel()
 	if err := client.Subscribe(subCtx, marketws.ChannelSubscribeRequest{AssetIDs: tokens}); err != nil {
 		return err

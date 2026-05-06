@@ -5,6 +5,10 @@ export const DEFAULT_PARAMS: GlobalParams = {
   externalDefaultStopLossPct: 20,
   homeMarketsTimeoutSec: 25,
   homeMarketsCacheTtlSec: 180,
+  userWsConnectTimeoutSec: 15,
+  dataApiTimeoutSec: 30,
+  marketWsConnectTimeoutSec: 15,
+  proxyUrl: "",
   maxSpread: 0.05,
   minDepthMultiplier: 3,
   leagues: ["NBA", "NHL"],
@@ -59,6 +63,40 @@ export function normalizeGlobalParamsFromServer(data: unknown): GlobalParams {
         ),
       ),
     ),
+    userWsConnectTimeoutSec: Math.round(
+      Math.min(
+        60,
+        Math.max(
+          5,
+          num(
+            r.userWsConnectTimeoutSec ?? r["user_ws_connect_timeout_sec"],
+            DEFAULT_PARAMS.userWsConnectTimeoutSec,
+          ),
+        ),
+      ),
+    ),
+    dataApiTimeoutSec: Math.round(
+      Math.min(
+        120,
+        Math.max(
+          10,
+          num(r.dataApiTimeoutSec ?? r["data_api_timeout_sec"], DEFAULT_PARAMS.dataApiTimeoutSec),
+        ),
+      ),
+    ),
+    marketWsConnectTimeoutSec: Math.round(
+      Math.min(
+        60,
+        Math.max(
+          5,
+          num(
+            r.marketWsConnectTimeoutSec ?? r["market_ws_connect_timeout_sec"],
+            DEFAULT_PARAMS.marketWsConnectTimeoutSec,
+          ),
+        ),
+      ),
+    ),
+    proxyUrl: typeof r.proxyUrl === "string" ? r.proxyUrl.trim() : DEFAULT_PARAMS.proxyUrl,
     maxSpread: num(r.maxSpread, DEFAULT_PARAMS.maxSpread),
     minDepthMultiplier: num(r.minDepthMultiplier, DEFAULT_PARAMS.minDepthMultiplier),
     tiers: tiers.length >= 1 ? tiers : DEFAULT_PARAMS.tiers,

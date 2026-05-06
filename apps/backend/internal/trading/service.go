@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -25,17 +27,77 @@ import (
 const (
 	polygonChainID          = 137
 	gnosisSafeSignatureType = 3
+	// Worst-price slack below snapshot best bid for FAK sells (ticks), per Polymarket market-order semantics.
+	marketSellWorstSlippageTicks = 10
 )
 
 // Service wraps authenticated CLOB, Data API, and public market clients.
 type Service struct {
 	mu          sync.Mutex
 	idempotency map[string]map[string]any
+	dataTimeout time.Duration
+	proxyURL    *url.URL
 }
 
 // New creates a trading service.
 func New() *Service {
 	return &Service{idempotency: map[string]map[string]any{}}
+}
+
+// SetDataAPITimeout configures the HTTP timeout for Polymarket Data API calls
+// (positions, portfolio value, etc.). A zero or negative value falls back to 30s.
+func (s *Service) SetDataAPITimeout(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dataTimeout = d
+}
+
+// SetProxy configures the HTTP/WS proxy for all Polymarket outbound traffic.
+// An empty or invalid string clears the proxy (direct connection).
+func (s *Service) SetProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if raw == "" {
+		s.proxyURL = nil
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid proxy URL: %w", err)
+	}
+	s.proxyURL = u
+	return nil
+}
+
+func (s *Service) httpClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{}
+	if s.proxyURL != nil {
+		transport.Proxy = http.ProxyURL(s.proxyURL)
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+}
+
+func (s *Service) httpxClient(baseURL string, timeout time.Duration) (*httpx.Client, error) {
+	return httpx.NewWithHTTPClient(httpx.ClientConfig{
+		BaseURL: baseURL,
+		Timeout: timeout,
+	}, s.httpClient(timeout))
+}
+
+func (s *Service) dataClient() (*data.Client, error) {
+	timeout := s.dataTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	client, err := s.httpxClient("https://data-api.polymarket.com", timeout)
+	if err != nil {
+		return nil, err
+	}
+	return data.NewClient(client)
 }
 
 // PlaceOrder submits a market-like CLOB order for the default account.
@@ -59,13 +121,16 @@ func (s *Service) PlaceOrder(ctx context.Context, acc models.AccountRecord, req 
 		s.idempotencyPut(idempotencyKey, resp)
 		return resp, nil
 	}
-	price, tickSize, negRisk, err := s.executionPrice(ctx, tokenID, side, req.Price)
+	price, tickSize, negRisk, minOrderSz, err := s.executionPrice(ctx, tokenID, side, req.Price)
 	if err != nil {
 		return nil, err
 	}
 	size := quantizeShares(req.AmountUSDC / price)
 	if size <= 0 {
 		return nil, fmt.Errorf("amountUsdc too small for current price")
+	}
+	if err := validateOrderSizeAgainstBook(size, minOrderSz, side); err != nil {
+		return nil, err
 	}
 	client, signer, creds, err := s.orderClient(acc)
 	if err != nil {
@@ -95,6 +160,13 @@ func (s *Service) PlaceOrder(ctx context.Context, acc models.AccountRecord, req 
 	if err != nil {
 		return nil, err
 	}
+	if !resp.Success {
+		msg := strings.TrimSpace(resp.ErrorMsg)
+		if msg == "" {
+			msg = "CLOB rejected order (success=false)"
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 	out := map[string]any{
 		"orderID":       resp.OrderID,
 		"status":        resp.Status,
@@ -118,7 +190,46 @@ func (s *Service) PlaceOrder(ctx context.Context, acc models.AccountRecord, req 
 	return out, nil
 }
 
-// MarketSellShares submits a FAK sell order for an existing position.
+// OrderBookSummary returns public CLOB book fields for UI preflight (no auth).
+func (s *Service) OrderBookSummary(ctx context.Context, tokenID string) (map[string]any, error) {
+	tokenID = strings.TrimSpace(tokenID)
+	if tokenID == "" {
+		return nil, fmt.Errorf("tokenId is required")
+	}
+	httpClient, err := s.httpxClient(clobURL(), 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	marketClient, err := markets.NewClient(httpClient)
+	if err != nil {
+		return nil, err
+	}
+	book, err := marketClient.GetOrderBook(ctx, tokenID)
+	if err != nil {
+		return nil, err
+	}
+	tick := 0.01
+	if parsed, err := strconv.ParseFloat(strings.TrimSpace(book.TickSize), 64); err == nil && parsed > 0 {
+		tick = parsed
+	}
+	minOrder := 0.0
+	if mos, err := strconv.ParseFloat(strings.TrimSpace(book.MinOrderSize), 64); err == nil && mos > 0 {
+		minOrder = mos
+	}
+	return map[string]any{
+		"tokenId":      tokenID,
+		"minOrderSize": minOrder,
+		"tickSize":     tick,
+		"bestBid":      bestBookPrice(book.Bids),
+		"bestAsk":      bestBookPrice(book.Asks),
+		"negRisk":      book.NegRisk,
+	}, nil
+}
+
+// MarketSellShares submits a FAK sell for closing / stop / take-profit.
+// Signed limit price is the worst acceptable (minimum USDC per share), aligned to the tick grid and set several
+// ticks below the snapshot best bid so it stays marketable if the book moves — same role as `price` on official
+// market sells (https://docs.polymarket.com/trading/orders/create). CLOB min_order_size is enforced by the API.
 func (s *Service) MarketSellShares(ctx context.Context, acc models.AccountRecord, tokenID string, shares float64, dryRun bool) (map[string]any, error) {
 	tokenID = strings.TrimSpace(tokenID)
 	if tokenID == "" {
@@ -130,13 +241,20 @@ func (s *Service) MarketSellShares(ctx context.Context, acc models.AccountRecord
 	if dryRun {
 		return map[string]any{"orderID": "dry-run-sell", "status": "DRY_RUN", "success": true}, nil
 	}
-	price, tickSize, negRisk, err := s.executionPrice(ctx, tokenID, "SELL", nil)
+	tickSize, negRisk, minOrderSz, bestBid, err := s.clobOutcomeBook(ctx, tokenID)
 	if err != nil {
 		return nil, err
 	}
+	if bestBid <= 0 {
+		return nil, fmt.Errorf("no bid liquidity for token; cannot market-close")
+	}
+	price := marketWorstPriceForFAKSell(tickSize, bestBid)
 	size := quantizeShares(shares)
 	if size <= 0 {
 		return nil, fmt.Errorf("shares invalid after lot-size quantize")
+	}
+	if err := validateOrderSizeAgainstBook(size, minOrderSz, "SELL"); err != nil {
+		return nil, err
 	}
 	client, signer, creds, err := s.orderClient(acc)
 	if err != nil {
@@ -161,6 +279,13 @@ func (s *Service) MarketSellShares(ctx context.Context, acc models.AccountRecord
 	if err != nil {
 		return nil, err
 	}
+	if !resp.Success {
+		msg := strings.TrimSpace(resp.ErrorMsg)
+		if msg == "" {
+			msg = "CLOB rejected market sell (success=false)"
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 	out := map[string]any{
 		"orderID":      resp.OrderID,
 		"status":       resp.Status,
@@ -170,13 +295,15 @@ func (s *Service) MarketSellShares(ctx context.Context, acc models.AccountRecord
 		"takingAmount": resp.TakingAmount,
 	}
 	logrus.WithFields(logrus.Fields{
-		"component":  "orders",
-		"account_id": acc.ID,
-		"token_id":   tokenID,
-		"shares":     size,
-		"order_id":   resp.OrderID,
-		"success":    resp.Success,
-	}).Info("market sell submitted")
+		"component":   "orders",
+		"account_id":  acc.ID,
+		"token_id":    tokenID,
+		"shares":      size,
+		"limit_price": price,
+		"best_bid":    bestBid,
+		"order_id":    resp.OrderID,
+		"success":     resp.Success,
+	}).Info("market sell submitted (FAK @ worst-price limit)")
 	return out, nil
 }
 
@@ -250,7 +377,7 @@ func (s *Service) PortfolioValue(ctx context.Context, acc models.AccountRecord) 
 	if addr == "" {
 		return 0, fmt.Errorf("account address is empty")
 	}
-	client, err := data.DefaultClient()
+	client, err := s.dataClient()
 	if err != nil {
 		return 0, err
 	}
@@ -272,7 +399,7 @@ func (s *Service) SyncPositionsFromDataAPI(ctx context.Context, acc models.Accou
 	if addr == "" {
 		return nil, fmt.Errorf("account address is empty")
 	}
-	client, err := data.DefaultClient()
+	client, err := s.dataClient()
 	if err != nil {
 		return nil, err
 	}
@@ -385,42 +512,119 @@ func (s *Service) SyncPositionsFromDataAPI(ctx context.Context, acc models.Accou
 	return out, nil
 }
 
-func (s *Service) executionPrice(ctx context.Context, tokenID, side string, override *float64) (float64, float64, bool, error) {
+func (s *Service) executionPrice(ctx context.Context, tokenID, side string, override *float64) (float64, float64, bool, float64, error) {
 	tickSize := 0.01
 	negRisk := false
+	minOrderSz := 0.0
 	if override != nil && *override > 0 {
-		return *override, tickSize, negRisk, nil
+		p := alignPriceToTick(*override, tickSize, side)
+		return p, tickSize, negRisk, minOrderSz, nil
 	}
-	httpClient, err := httpx.New(httpx.ClientConfig{BaseURL: clobURL(), Timeout: 10 * time.Second})
+	tickSize, negRisk, minOrderSz, bid, ask, err := s.clobOutcomeBookSides(ctx, tokenID)
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, false, 0, err
 	}
-	marketClient, err := markets.NewClient(httpClient)
-	if err != nil {
-		return 0, 0, false, err
-	}
-	book, err := marketClient.GetOrderBook(ctx, tokenID)
-	if err != nil {
-		return 0, 0, false, err
-	}
-	if parsed, err := strconv.ParseFloat(book.TickSize, 64); err == nil && parsed > 0 {
-		tickSize = parsed
-	}
-	negRisk = book.NegRisk
 	var price float64
 	if side == "SELL" {
-		price = bestBookPrice(book.Bids)
+		price = bid
 	} else {
-		price = bestBookPrice(book.Asks)
+		price = ask
 	}
 	if price <= 0 {
-		return 0, 0, false, fmt.Errorf("no executable %s price for token", side)
+		return 0, 0, false, minOrderSz, fmt.Errorf("no executable %s price for token", side)
 	}
-	return price, tickSize, negRisk, nil
+	price = alignPriceToTick(price, tickSize, side)
+	if price <= 0 {
+		return 0, 0, false, minOrderSz, fmt.Errorf("price aligned to tick is invalid for %s", side)
+	}
+	return price, tickSize, negRisk, minOrderSz, nil
+}
+
+// clobOutcomeBook loads tick / neg-risk / min size and best bid (for liquidity check on sells).
+func (s *Service) clobOutcomeBook(ctx context.Context, tokenID string) (tickSize float64, negRisk bool, minOrderSz float64, bestBid float64, err error) {
+	tickSize, negRisk, minOrderSz, bestBid, _, err = s.clobOutcomeBookSides(ctx, tokenID)
+	return tickSize, negRisk, minOrderSz, bestBid, err
+}
+
+func (s *Service) clobOutcomeBookSides(ctx context.Context, tokenID string) (tickSize float64, negRisk bool, minOrderSz float64, bestBid float64, bestAsk float64, err error) {
+	tokenID = strings.TrimSpace(tokenID)
+	if tokenID == "" {
+		return 0, false, 0, 0, 0, fmt.Errorf("tokenId is required")
+	}
+	httpClient, e := s.httpxClient(clobURL(), 10*time.Second)
+	if e != nil {
+		return 0, false, 0, 0, 0, e
+	}
+	marketClient, e := markets.NewClient(httpClient)
+	if e != nil {
+		return 0, false, 0, 0, 0, e
+	}
+	book, e := marketClient.GetOrderBook(ctx, tokenID)
+	if e != nil {
+		return 0, false, 0, 0, 0, e
+	}
+	tickSize = 0.01
+	if parsed, e := strconv.ParseFloat(strings.TrimSpace(book.TickSize), 64); e == nil && parsed > 0 {
+		tickSize = parsed
+	}
+	if mos, e := strconv.ParseFloat(strings.TrimSpace(book.MinOrderSize), 64); e == nil && mos > 0 {
+		minOrderSz = mos
+	}
+	negRisk = book.NegRisk
+	bestBid = bestBookPrice(book.Bids)
+	bestAsk = bestBookPrice(book.Asks)
+	return tickSize, negRisk, minOrderSz, bestBid, bestAsk, nil
+}
+
+// marketWorstPriceForFAKSell returns the signed limit for a marketable outcome-token sell: minimum USDC/share
+// you will accept, on-tick and <= snapshot best bid so resting bids can match (Polymarket “market” sell).
+func marketWorstPriceForFAKSell(tick, bestBid float64) float64 {
+	if tick <= 0 {
+		tick = 0.01
+	}
+	if bestBid <= 0 {
+		return tick
+	}
+	raw := bestBid - float64(marketSellWorstSlippageTicks)*tick
+	if raw < tick {
+		raw = tick
+	}
+	worst := alignPriceToTick(raw, tick, "SELL")
+	touch := alignPriceToTick(bestBid, tick, "SELL")
+	if worst > touch+1e-12 {
+		worst = touch
+	}
+	if worst < tick {
+		worst = tick
+	}
+	return worst
+}
+
+func alignPriceToTick(price, tick float64, side string) float64 {
+	if tick <= 0 || price <= 0 {
+		return price
+	}
+	steps := price / tick
+	if strings.ToUpper(strings.TrimSpace(side)) == "SELL" {
+		return math.Floor(steps+1e-9) * tick
+	}
+	return math.Ceil(steps-1e-9) * tick
+}
+
+func validateOrderSizeAgainstBook(size, minOrderSz float64, side string) error {
+	if minOrderSz > 0 && size+1e-9 < minOrderSz {
+		return fmt.Errorf(
+			"order size %.4f below CLOB min_order_size %.4f (%s); Polymarket rejects sub-minimum orders with HTTP 400 — reduce position dust or close on polymarket.com",
+			size,
+			minOrderSz,
+			side,
+		)
+	}
+	return nil
 }
 
 func (s *Service) orderClient(acc models.AccountRecord) (*orders.Client, *polyauth.Signer, polyauth.APICredentials, error) {
-	httpClient, err := httpx.New(httpx.ClientConfig{BaseURL: clobURL(), Timeout: 30 * time.Second})
+	httpClient, err := s.httpxClient(clobURL(), 30*time.Second)
 	if err != nil {
 		return nil, nil, polyauth.APICredentials{}, err
 	}
@@ -437,7 +641,7 @@ func (s *Service) orderClient(acc models.AccountRecord) (*orders.Client, *polyau
 }
 
 func (s *Service) balanceClient(acc models.AccountRecord) (*balances.Client, polyauth.APICredentials, error) {
-	httpClient, err := httpx.New(httpx.ClientConfig{BaseURL: clobURL(), Timeout: 15 * time.Second})
+	httpClient, err := s.httpxClient(clobURL(), 15*time.Second)
 	if err != nil {
 		return nil, polyauth.APICredentials{}, err
 	}

@@ -86,14 +86,31 @@ func NewApp(ctx context.Context, cfg config.Config) (*App, error) {
 		Trading:      tradingService,
 		syncStatus:   map[string]any{},
 	}
+	app.Trading.SetDataAPITimeout(app.dataAPITimeout())
+	app.PriceFeed.SetTimeouts(app.marketWsTimeouts())
+	_ = app.Trading.SetProxy(app.proxyURL())
+	_ = app.PriceFeed.SetProxy(app.proxyURL())
 	app.Hub = realtime.NewHub(priceFeed)
 	priceFeed.SetPublisher(app.Hub.BroadcastBoardTicks)
 	priceFeed.SetTickHandler(app.handlePriceTicks)
-	app.UserFeed = realtime.NewUserFeed(app.Accounts.Default, func(ctx context.Context) {
-		if _, err := app.SyncChainPositions(ctx); err != nil {
-			logrus.WithError(err).WithField("component", "chain_sync").Warn("chain sync after user websocket event failed")
-		}
-	})
+	app.UserFeed = realtime.NewUserFeed(
+		app.Accounts.Default,
+		func() (time.Duration, time.Duration) {
+			sec := 15
+			if raw, ok := app.GlobalParams["userWsConnectTimeoutSec"]; ok {
+				if n, ok := intFromAnyParam(raw); ok && n > 0 {
+					sec = n
+				}
+			}
+			return time.Duration(sec) * time.Second, time.Duration(sec/2) * time.Second
+		},
+		func(ctx context.Context) {
+			if _, err := app.SyncChainPositions(ctx); err != nil {
+				logrus.WithError(err).WithField("component", "chain_sync").Warn("chain sync after user websocket event failed")
+			}
+		},
+	)
+	_ = app.UserFeed.SetProxy(app.proxyURL())
 	return app, nil
 }
 
@@ -127,6 +144,7 @@ func (a *App) Router() http.Handler {
 	r.POST("/orders", a.placeOrder)
 	r.GET("/orders/:id", a.getOrder)
 	r.POST("/trading/market-sell", a.marketSell)
+	r.GET("/trading/order-book", a.getTradingOrderBook)
 	r.POST("/trading/close-all", a.closeAllTrading)
 	r.GET("/trading/orders", a.listTradingOrders)
 	r.GET("/trading/trades", a.listTradingTrades)
@@ -372,13 +390,13 @@ func (a *App) createAccount(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), accounts.CreateAccountRequestTimeout())
 	defer cancel()
 	logrus.WithFields(logrus.Fields{
 		"component": "accounts",
 		"label":     labelValue(req.Label),
 	}).Info("create account requested")
-	rec, err := accounts.DeriveAccountRecordWithCLOB(ctx, req.Label, req.EVMPrivateKey)
+	rec, err := accounts.DeriveAccountRecordWithCLOB(ctx, req.Label, req.EVMPrivateKey, a.proxyURL())
 	if err != nil {
 		logrus.WithError(err).WithFields(logrus.Fields{
 			"component": "accounts",
@@ -514,6 +532,22 @@ func (a *App) getOrder(c *gin.Context) {
 	c.JSON(http.StatusNotFound, map[string]any{"error": "order not found"})
 }
 
+func (a *App) getTradingOrderBook(c *gin.Context) {
+	tokenID := strings.TrimSpace(c.Query("token_id"))
+	if tokenID == "" {
+		c.JSON(http.StatusBadRequest, map[string]any{"error": "token_id is required"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	summary, err := a.Trading.OrderBookSummary(ctx, tokenID)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
 func (a *App) marketSell(c *gin.Context) {
 	var req models.MarketSellRequest
 	if err := json.NewDecoder(c.Request.Body).Decode(&req); err != nil {
@@ -633,7 +667,7 @@ func (a *App) registerPosition(c *gin.Context) {
 }
 
 func (a *App) postChainSync(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), a.dataAPITimeout()+15*time.Second)
 	defer cancel()
 	res, err := a.SyncChainPositions(ctx)
 	if err != nil {
@@ -801,11 +835,9 @@ func (a *App) wsMonitor(c *gin.Context) {
 func (a *App) handlePriceTicks(_ []risk.Tick) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	changed := a.processCloseQueue(ctx)
-	if a.evaluateTrailingStops(ctx) {
-		changed = true
-	}
-	if changed && a.Hub != nil {
+	a.processCloseQueue(ctx)
+	a.evaluateTrailingStops(ctx)
+	if a.Hub != nil {
 		a.Hub.BroadcastMonitor(a.PriceBook.BuildSnapshot(a.Positions.ListAll(), a.Positions.Risk()))
 	}
 }
@@ -845,7 +877,7 @@ func (a *App) RunChainSync(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			runCtx, cancel := context.WithTimeout(ctx, a.dataAPITimeout()+15*time.Second)
 			if _, err := a.SyncChainPositions(runCtx); err != nil {
 				logrus.WithError(err).WithField("component", "chain_sync").Warn("periodic chain sync failed")
 			}
@@ -963,6 +995,20 @@ func (a *App) stopLossTiers() []models.TierConfig {
 	return out
 }
 
+// nonRetryableMarketSellErr: order parameters will not become valid by retrying (CLOB 400 class).
+func nonRetryableMarketSellErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "below clob min_order_size") ||
+		strings.Contains(msg, "likely below clob minimum") ||
+		strings.Contains(msg, "shares invalid after lot-size") ||
+		strings.Contains(msg, "invalid_order_min_size") ||
+		strings.Contains(msg, "min size") ||
+		strings.Contains(msg, "order min size")
+}
+
 func (a *App) evaluateTrailingStops(ctx context.Context) bool {
 	acc, ok := a.Accounts.Default()
 	if !ok {
@@ -1013,7 +1059,19 @@ func (a *App) evaluateTrailingStops(ctx context.Context) bool {
 			continue
 		}
 		if _, err := a.Trading.MarketSellShares(ctx, acc, ref.TokenID, ref.Shares, false); err != nil {
-			_ = a.Positions.RecordCloseFailure(ctx, ref.ID, "trail_stop", err.Error())
+			if nonRetryableMarketSellErr(err) {
+				_ = a.Positions.RemoveCloseTask(ctx, ref.ID, "trail_stop")
+				_, _, _ = a.Positions.Update(ctx, ref.ID, func(p *models.Position) {
+					p.MonitoringActive = false
+				})
+				logrus.WithError(err).WithFields(logrus.Fields{
+					"component":   "stop_loss",
+					"position_id": ref.ID,
+					"token_id":    ref.TokenID,
+				}).Warn("trail stop sell aborted (non-retryable); monitoring disabled — fix size/liquidity or close on polymarket.com")
+			} else {
+				_ = a.Positions.RecordCloseFailure(ctx, ref.ID, "trail_stop", err.Error())
+			}
 			changed = true
 			continue
 		}
@@ -1050,7 +1108,19 @@ func (a *App) processCloseQueue(ctx context.Context) bool {
 			continue
 		}
 		if _, err := a.Trading.MarketSellShares(ctx, acc, pos.TokenID, pos.Shares, false); err != nil {
-			_ = a.Positions.RecordCloseFailure(ctx, pos.ID, task.Kind, err.Error())
+			if nonRetryableMarketSellErr(err) {
+				_ = a.Positions.RemoveCloseTask(ctx, task.PositionID, task.Kind)
+				_, _, _ = a.Positions.Update(ctx, pos.ID, func(p *models.Position) {
+					p.MonitoringActive = false
+				})
+				logrus.WithError(err).WithFields(logrus.Fields{
+					"component":   "stop_loss",
+					"position_id": pos.ID,
+					"token_id":    pos.TokenID,
+				}).Warn("close queue sell aborted (non-retryable); monitoring disabled")
+			} else {
+				_ = a.Positions.RecordCloseFailure(ctx, pos.ID, task.Kind, err.Error())
+			}
 			changed = true
 			continue
 		}
@@ -1134,6 +1204,60 @@ func (a *App) homeMarketsCacheTTL() time.Duration {
 		sec = maxSec
 	}
 	return time.Duration(sec) * time.Second
+}
+
+func (a *App) dataAPITimeout() time.Duration {
+	const minSec = 10
+	const maxSec = 120
+	sec := 30
+	for _, key := range []string{"dataApiTimeoutSec", "data_api_timeout_sec"} {
+		if v, ok := a.GlobalParams[key]; ok {
+			if n, ok := intFromAnyParam(v); ok {
+				sec = n
+				break
+			}
+		}
+	}
+	if sec < minSec {
+		sec = minSec
+	}
+	if sec > maxSec {
+		sec = maxSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func (a *App) marketWsTimeouts() (time.Duration, time.Duration) {
+	const minSec = 5
+	const maxSec = 60
+	sec := 15
+	for _, key := range []string{"marketWsConnectTimeoutSec", "market_ws_connect_timeout_sec"} {
+		if v, ok := a.GlobalParams[key]; ok {
+			if n, ok := intFromAnyParam(v); ok {
+				sec = n
+				break
+			}
+		}
+	}
+	if sec < minSec {
+		sec = minSec
+	}
+	if sec > maxSec {
+		sec = maxSec
+	}
+	conn := time.Duration(sec) * time.Second
+	return conn, conn / 2
+}
+
+func (a *App) proxyURL() string {
+	for _, key := range []string{"proxyUrl", "proxy_url"} {
+		if v, ok := a.GlobalParams[key]; ok {
+			if s, ok := v.(string); ok {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
 }
 
 func intFromAnyParam(v any) (int, bool) {

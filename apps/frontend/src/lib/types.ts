@@ -17,6 +17,14 @@ export interface GlobalParams {
   homeMarketsTimeoutSec: number;
   /** 后端赛事列表磁盘缓存 TTL（秒），与 Polymarket 全局参数一并保存 */
   homeMarketsCacheTtlSec: number;
+  /** 后端用户 WS 连接超时（秒）；网络差或 IPv6 fallback 慢时可调大 */
+  userWsConnectTimeoutSec: number;
+  /** Data API（持仓同步 / 资产组合）请求超时（秒） */
+  dataApiTimeoutSec: number;
+  /** 后端行情 WS 连接超时（秒） */
+  marketWsConnectTimeoutSec: number;
+  /** HTTP/WS 代理地址（如 http://127.0.0.1:15236），留空则直连 */
+  proxyUrl: string;
   maxSpread: number; // 最大允许买卖价差
   minDepthMultiplier: number; // 深度需大于建议金额倍数
   tiers: TierConfig[];

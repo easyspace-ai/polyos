@@ -102,6 +102,47 @@ export function SettingsTab() {
             }
             title="后端 home/markets 结果在磁盘上的新鲜度窗口；超时或点「刷新」会重新拉 Gamma/ESPN。建议 60–600；过短会增加上游压力。"
           />
+          <Field
+            label="用户 WS 连接超时（秒）"
+            value={params.userWsConnectTimeoutSec}
+            onChange={(v) =>
+              setParams({
+                userWsConnectTimeoutSec: Math.min(60, Math.max(5, Math.round(v))),
+              })
+            }
+            title="后端连接 Polymarket 用户推送 WebSocket 的握手超时。网络差或 IPv6 fallback 慢时可调大（建议 15–30）。"
+          />
+          <Field
+            label="Data API 超时（秒）"
+            value={params.dataApiTimeoutSec}
+            onChange={(v) =>
+              setParams({
+                dataApiTimeoutSec: Math.min(120, Math.max(10, Math.round(v))),
+              })
+            }
+            title="后端拉取持仓 / 资产组合的 HTTP 超时。Data API 慢或持仓多时可调大（建议 30–60）。"
+          />
+          <Field
+            label="行情 WS 超时（秒）"
+            value={params.marketWsConnectTimeoutSec}
+            onChange={(v) =>
+              setParams({
+                marketWsConnectTimeoutSec: Math.min(60, Math.max(5, Math.round(v))),
+              })
+            }
+            title="后端连接 Polymarket 行情推送 WebSocket 的握手超时。价格不更新时可调大（建议 15–30）。"
+          />
+          <div>
+            <Label className="text-xs text-muted-foreground">代理地址</Label>
+            <Input
+              type="text"
+              value={params.proxyUrl}
+              onChange={(e) => setParams({ proxyUrl: e.target.value.trim() })}
+              placeholder="如 http://127.0.0.1:15236"
+              className="mt-1"
+              title="所有 Polymarket HTTP / WebSocket 请求将走此代理；留空则直连。"
+            />
+          </div>
         </div>
         {LOCK_CROSS_MARKET_UI_PARAMS ? (
           <p className="mt-3 text-xs text-muted-foreground">

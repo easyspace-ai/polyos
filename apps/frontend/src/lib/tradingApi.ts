@@ -6,8 +6,10 @@ import { normalizeGlobalParamsFromServer } from "./defaults";
 async function errBody(res: Response): Promise<string> {
   const t = await res.text();
   try {
-    const j = JSON.parse(t) as { error?: string };
-    return j.error ?? t;
+    const j = JSON.parse(t) as { error?: string; errorMsg?: string; message?: string };
+    const parts = [j.error, j.errorMsg, j.message].filter((x): x is string => typeof x === "string" && x.trim() !== "");
+    if (parts.length) return parts.join(" — ");
+    return t;
   } catch {
     return t || res.statusText;
   }
@@ -131,6 +133,31 @@ export async function registerBackendPosition(body: {
     throw new Error(await errBody(res));
   }
   return (await res.json()) as BackendPaperPosition;
+}
+
+/** Public CLOB book summary for sell preflight (min order size, ticks). */
+export async function fetchOrderBookSummary(tokenId: string): Promise<{
+  tokenId: string;
+  minOrderSize: number;
+  tickSize: number;
+  bestBid: number;
+  bestAsk: number;
+  negRisk: boolean;
+}> {
+  const qs = new URLSearchParams({ token_id: tokenId.trim() });
+  const res = await fetch(`${BACKEND_BASE}/trading/order-book?${qs.toString()}`);
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    throw new Error(typeof body.error === "string" ? body.error : `order-book failed (${res.status})`);
+  }
+  return {
+    tokenId: String(body.tokenId ?? tokenId),
+    minOrderSize: Number(body.minOrderSize) || 0,
+    tickSize: Number(body.tickSize) || 0.01,
+    bestBid: Number(body.bestBid) || 0,
+    bestAsk: Number(body.bestAsk) || 0,
+    negRisk: Boolean(body.negRisk),
+  };
 }
 
 export async function marketSell(params: {
